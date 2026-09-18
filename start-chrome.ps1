@@ -7,7 +7,6 @@ if (-not (Test-Path $chromePath)) { throw "Chrome exe not found" }
 $chromeProfile = "C:\temp\ChromeProfile"
 $targetUrl = "about:blank"
 
-# اگه پروفایل قبلی هست، پاکش کن
 if (Test-Path $chromeProfile) {
     Remove-Item $chromeProfile -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -20,7 +19,6 @@ $arguments = @(
     "--disable-features=Translate,OptimizationHints",
     "--disable-blink-features=AutomationControlled",
     "--start-maximized",
-    "--new-window",
     "--user-data-dir=$chromeProfile",
     "--remote-debugging-port=9222",
     "--remote-debugging-address=127.0.0.1",
@@ -29,38 +27,41 @@ $arguments = @(
 
 Write-Host "Starting Chrome..."
 $chromeProcess = Start-Process -FilePath $chromePath -ArgumentList $arguments -PassThru
-if ($null -eq $chromeProcess) { throw "Chrome failed to start" }
 Write-Host "Chrome PID: $($chromeProcess.Id)"
 
-Start-Sleep -Seconds 10
+# صبر تا پورت debug باز بشه
+$ok = $false
+for ($i = 0; $i -lt 30; $i++) {
+    try {
+        $null = Invoke-WebRequest -Uri "http://127.0.0.1:9222/json/version" -UseBasicParsing -TimeoutSec 3
+        Write-Host "✅ Chrome debug ready"
+        $ok = $true
+        break
+    } catch {
+        Start-Sleep -Milliseconds 500
+    }
+}
+if (-not $ok) { throw "Chrome debug port 9222 not reachable" }
 
-Add-Type @"
+# چک اینکه پنجره داره یا نه
+Start-Sleep -Seconds 3
+$win = Get-Process chrome -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowHandle -ne 0 } |
+    Select-Object -First 1
+if ($null -eq $win) {
+    Write-Host "⚠️  Chrome window not found (session 0 - no desktop)"
+    Write-Host "ℹ️  Video recording will use CDP screenshots"
+} else {
+    Write-Host "✅ Chrome window found: HWND=$($win.MainWindowHandle)"
+    Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public static class ChromeWindow {
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+public static class Win {
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     public const int SW_MAXIMIZE = 3;
 }
 "@
-
-$chromeWindow = Get-Process chrome -ErrorAction SilentlyContinue |
-    Where-Object { $_.MainWindowHandle -ne 0 } |
-    Sort-Object StartTime -Descending |
-    Select-Object -First 1
-
-if ($null -eq $chromeWindow) { throw "Chrome window not found" }
-
-[ChromeWindow]::ShowWindow($chromeWindow.MainWindowHandle, [ChromeWindow]::SW_MAXIMIZE) | Out-Null
-Start-Sleep -Milliseconds 800
-[ChromeWindow]::SetForegroundWindow($chromeWindow.MainWindowHandle) | Out-Null
-Start-Sleep -Seconds 2
-
-# تست پورت debug
-try {
-    $resp = Invoke-WebRequest -Uri "http://127.0.0.1:9222/json/version" -UseBasicParsing -TimeoutSec 10
-    Write-Host "✅ Chrome debug ready"
-    Write-Host $resp.Content
-} catch {
-    throw "Chrome debug port not ready: $($_.Exception.Message)"
+    [Win]::ShowWindow($win.MainWindowHandle, [Win]::SW_MAXIMIZE) | Out-Null
+    [Win]::SetForegroundWindow($win.MainWindowHandle) | Out-Null
 }
