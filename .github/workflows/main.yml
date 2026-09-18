@@ -1,16 +1,16 @@
-name: Windows RDP + Tailscale + Chrome + Record
+name: Instagram Signup on RDP + Record
 
-on:
+"on":
   workflow_dispatch:
 
 jobs:
   rdp-record:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     env:
       RDP_USERNAME: runneradmin
-      RDP_PASSWORD: "RdpAccess#2026X"
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
     steps:
       - name: Checkout repository
@@ -22,6 +22,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $username = $env:RDP_USERNAME
           $password = $env:RDP_PASSWORD
+          if ([string]::IsNullOrEmpty($password)) { throw "RDP_PASSWORD secret missing" }
           $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
           $existingUser = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
           if ($null -ne $existingUser) {
@@ -29,17 +30,15 @@ jobs:
           } else {
               New-LocalUser -Name $username -Password $securePassword -PasswordNeverExpires -UserMayNotChangePassword -Description "Temp RDP" -ErrorAction Stop
           }
-          $adminMember = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
-          if ($null -eq $adminMember) { Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction Stop }
-          $rdpMember = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "\\$([regex]::Escape($username))$" }
-          if ($null -eq $rdpMember) { Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction Stop }
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1 -Force
-          Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue | Enable-NetFirewallRule -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Force
+          Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue | Disable-NetFirewallRule -ErrorAction SilentlyContinue
           Set-Service -Name "TermService" -StartupType Automatic -ErrorAction Stop
           Restart-Service -Name "TermService" -Force -ErrorAction Stop
           Start-Sleep -Seconds 4
-          Write-Host "RDP configured."
+          Write-Host "RDP ready."
 
       - name: Install and Start Tailscale
         shell: powershell
@@ -47,38 +46,59 @@ jobs:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           $ErrorActionPreference = "Stop"
-          $tailscaleExe = "C:\Program Files\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tailscaleExe)) {
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $ts)) {
               $installer = "$env:TEMP\tailscale-setup.exe"
               Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile $installer
               Start-Process -FilePath $installer -ArgumentList "/quiet" -Wait
-              Start-Sleep -Seconds 5
+              Start-Sleep -Seconds 8
           }
-          & $tailscaleExe up --auth-key="$env:TAILSCALE_AUTH_KEY" --hostname="github-actions-rdp-3" --accept-dns=false
-          if ($LASTEXITCODE -ne 0) { throw "Tailscale failed." }
+          $hostname = "gh-rdp-$($env:GITHUB_RUN_ID)"
+          & $ts up --auth-key="$env:TAILSCALE_AUTH_KEY" --hostname="$hostname" --accept-dns=false
+          if ($LASTEXITCODE -ne 0) { throw "Tailscale failed" }
           Start-Sleep -Seconds 5
-          $tailscaleIP = (& $tailscaleExe ip -4 | Out-String).Trim()
-          Write-Host "Tailscale IP: $tailscaleIP"
-          "TAILSCALE_IP=$tailscaleIP" | Out-File "$env:GITHUB_ENV" -Encoding utf8
+          $ip = (& $ts ip -4 | Out-String).Trim()
+          Write-Host "Tailscale IP: $ip"
+          "TAILSCALE_IP=$ip" | Out-File "$env:GITHUB_ENV" -Encoding utf8
+
+          $iface = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Tailscale" }
+          if ($iface) {
+              New-NetFirewallRule -DisplayName "RDP-Tailscale-Only" -Direction Inbound `
+                -Protocol TCP -LocalPort 3389 -Action Allow `
+                -InterfaceAlias $iface.Name | Out-Null
+          }
+
+      - name: Setup Python + Playwright
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
 
       - name: Install Chrome
         shell: powershell
         run: |
-          $ErrorActionPreference = "Stop"
           $paths = @(
             "C:\Program Files\Google\Chrome\Application\chrome.exe",
             "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
           )
-          $chromePath = $null
-          foreach ($p in $paths) { if (Test-Path $p) { $chromePath = $p; break } }
-          if (-not $chromePath) {
+          $chrome = $null
+          foreach ($p in $paths) { if (Test-Path $p) { $chrome = $p; break } }
+          if (-not $chrome) {
               choco install googlechrome -y --no-progress
-              Start-Sleep -Seconds 6
-              foreach ($p in $paths) { if (Test-Path $p) { $chromePath = $p; break } }
+              Start-Sleep -Seconds 8
+              foreach ($p in $paths) { if (Test-Path $p) { $chrome = $p; break } }
           }
-          if (-not $chromePath) { throw "Chrome not found." }
-          "CHROME_PATH=$chromePath" | Out-File "$env:GITHUB_ENV" -Encoding utf8
-          Write-Host "Chrome: $chromePath"
+          if (-not $chrome) { throw "Chrome not found" }
+          "CHROME_PATH=$chrome" | Out-File "$env:GITHUB_ENV" -Encoding utf8
+
+      - name: Install FFmpeg
+        shell: powershell
+        run: |
+          if (-not (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue)) {
+              choco install ffmpeg -y --no-progress
+              Start-Sleep -Seconds 8
+          }
+          if (-not (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue)) { throw "ffmpeg missing" }
 
       - name: Prepare Chrome profile
         shell: powershell
@@ -87,60 +107,46 @@ jobs:
           Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           Remove-Item "C:\temp\ChromeProfile" -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path "C:\temp\ChromeProfile" -Force | Out-Null
-          Write-Host "Profile ready."
 
       - name: Minimize all windows
         shell: powershell
         run: |
-          try {
-              $shell = New-Object -ComObject Shell.Application
-              $shell.MinimizeAll()
-          } catch { Write-Host "MinimizeAll failed: $($_.Exception.Message)" }
+          try { (New-Object -ComObject Shell.Application).MinimizeAll() } catch {}
           Start-Sleep -Seconds 2
 
       - name: Start Chrome with debug port
         shell: powershell
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\start-chrome.ps1"
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\start-chrome.ps1"
 
-      - name: Install FFmpeg
+      - name: Run recording + Instagram script
         shell: powershell
         run: |
-          $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-          if (-not $ffmpeg) {
-              choco install ffmpeg -y --no-progress
-              Start-Sleep -Seconds 5
-          }
-          $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-          if (-not $ffmpeg) { throw "FFmpeg not found." }
-          Write-Host "FFmpeg: $($ffmpeg.Source)"
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\record.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "run failed with $LASTEXITCODE" }
 
-      - name: Run recording
-        shell: powershell
-        run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\record.ps1"
-          if ($LASTEXITCODE -ne 0) { throw "Recording failed with code $LASTEXITCODE." }
-
-      - name: Debug outputs
+      - name: Debug logs
         if: always()
         shell: powershell
         run: |
-          Write-Host "=== LOG ==="
+          Write-Host "=== click-record.log ==="
           if (Test-Path "C:\temp\click-record.log") { Get-Content "C:\temp\click-record.log" }
-          Write-Host "=== FFMPEG ERR ==="
-          if (Test-Path "C:\temp\ffmpeg-error.log") { Get-Content "C:\temp\ffmpeg-error.log" }
+          Write-Host "=== ffmpeg-error.log (tail 40) ==="
+          if (Test-Path "C:\temp\ffmpeg-error.log") { Get-Content "C:\temp\ffmpeg-error.log" -Tail 40 }
 
-      - name: Upload outputs
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rdp-record-output
+          name: instagram-rdp-record
           path: |
-            C:\temp\rdp-click-screenshot.png
             C:\temp\rdp-click-video.mp4
+            C:\temp\rdp-click-screenshot.png
+            C:\temp\instagram_signup_filled.png
+            C:\temp\instagram_captcha_modal.png
+            C:\temp\instagram_captcha_clicked.png
+            C:\temp\error_missing_element.png
             C:\temp\click-record.log
-            C:\temp\ffmpeg-output.log
             C:\temp\ffmpeg-error.log
           if-no-files-found: warn
           retention-days: 7
