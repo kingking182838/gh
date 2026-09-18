@@ -7,182 +7,99 @@ $ffmpegOutput   = "C:\temp\ffmpeg-output.log"
 $ffmpegError    = "C:\temp\ffmpeg-error.log"
 
 function Log($text) {
-    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')  $text"
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff') $text"
     Write-Host $line
     Add-Content -Path $logFile -Value $line
 }
 
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class NativeWin {
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    public const int SW_RESTORE = 9;
-    public const int SW_MAXIMIZE = 3;
-}
-"@
-
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-$screen = [System.Windows.Forms.Screen]::PrimaryScreen
-if ($null -eq $screen) { throw "Primary screen null." }
-
-$screenX = $screen.Bounds.X
-$screenY = $screen.Bounds.Y
-$width   = $screen.Bounds.Width
-$height  = $screen.Bounds.Height
-
-Log "Screen: X=$screenX Y=$screenY W=$width H=$height"
-
-Log "Finding Chrome window..."
-$chromeWindow = $null
-for ($attempt = 1; $attempt -le 20; $attempt++) {
-    $chromeWindow = Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object StartTime -Descending | Select-Object -First 1
-    if ($null -ne $chromeWindow) { break }
-    Start-Sleep -Milliseconds 500
-}
-if ($null -eq $chromeWindow) { throw "Chrome window not found." }
-
-[NativeWin]::ShowWindow($chromeWindow.MainWindowHandle, [NativeWin]::SW_RESTORE) | Out-Null
-Start-Sleep -Milliseconds 300
-[NativeWin]::ShowWindow($chromeWindow.MainWindowHandle, [NativeWin]::SW_MAXIMIZE) | Out-Null
-Start-Sleep -Milliseconds 500
-[NativeWin]::SetForegroundWindow($chromeWindow.MainWindowHandle) | Out-Null
-Start-Sleep -Seconds 1
-Log "Chrome maximized."
-
+# پاک‌سازی فایل‌های قبلی
+Remove-Item $logFile -Force -ErrorAction SilentlyContinue
 Remove-Item $videoFile -Force -ErrorAction SilentlyContinue
 Remove-Item $screenshotFile -Force -ErrorAction SilentlyContinue
 Remove-Item $ffmpegOutput -Force -ErrorAction SilentlyContinue
 Remove-Item $ffmpegError -Force -ErrorAction SilentlyContinue
 
-Log "Starting 20s FFmpeg recording..."
-
-$ffmpegArgs = @(
-    "-y"
-    "-f" "gdigrab"
-    "-framerate" "30"
-    "-draw_mouse" "1"
-    "-i" "desktop"
-    "-t" "20"
-    "-c:v" "libx264"
-    "-preset" "veryfast"
-    "-pix_fmt" "yuv420p"
-    $videoFile
-)
-
-$ffmpegProcess = Start-Process -FilePath "ffmpeg.exe" -ArgumentList $ffmpegArgs -PassThru -RedirectStandardOutput $ffmpegOutput -RedirectStandardError $ffmpegError
-Log "FFmpeg PID = $($ffmpegProcess.Id)"
-
-Log "Waiting 5 seconds before typing..."
-Start-Sleep -Seconds 5
-
-# ==========================================================
-# TYPE INTO ELEMENT VIA CDP
-# ==========================================================
-
-$nanoAddress     = "nano_39zkq6o8tkqpmsg5f3csyzs4oy66sofuerbdyeagaxih5pzea3956q3619no"
-$elementSelector = "address"
-
-Log "Connecting to Chrome DevTools Protocol..."
-
-$targets = $null
+# چک کردن پورت debug
+Log "Checking Chrome debug port 9222..."
+$ok = $false
 for ($i = 0; $i -lt 20; $i++) {
     try {
-        $targets = Invoke-RestMethod "http://localhost:9222/json"
-        if ($targets) { break }
-    } catch {}
-    Start-Sleep -Milliseconds 500
+        $null = Invoke-WebRequest -Uri "http://127.0.0.1:9222/json/version" -UseBasicParsing -TimeoutSec 3
+        $ok = $true
+        break
+    } catch {
+        Start-Sleep -Milliseconds 500
+    }
 }
-if (-not $targets) { throw "Cannot connect to debug port 9222." }
+if (-not $ok) { throw "Chrome debug port 9222 not reachable" }
+Log "Chrome debug port OK."
 
-$page = $targets | Where-Object { $_.type -eq 'page' } | Select-Object -First 1
-if (-not $page) { throw "No active page." }
-Log "Page: $($page.url)"
+# شروع ضبط
+Log "Starting FFmpeg recording (max 300s)..."
+$ffmpegArgs = @(
+    "-y",
+    "-f", "gdigrab",
+    "-framerate", "15",
+    "-draw_mouse", "1",
+    "-i", "desktop",
+    "-t", "300",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-pix_fmt", "yuv420p",
+    $videoFile
+)
+$ffmpegProcess = Start-Process -FilePath "ffmpeg.exe" -ArgumentList $ffmpegArgs -PassThru `
+    -RedirectStandardOutput $ffmpegOutput -RedirectStandardError $ffmpegError
+Log "FFmpeg PID = $($ffmpegProcess.Id)"
 
-$wsUrl = $page.webSocketDebuggerUrl
-Log "WS: $wsUrl"
+Start-Sleep -Seconds 3
 
-$ws = New-Object System.Net.WebSockets.ClientWebSocket
-$ct = [System.Threading.CancellationToken]::None
-$ws.ConnectAsync([Uri]$wsUrl, $ct).Wait()
-Log "WS connected."
+# اجرای اسکریپت اینستاگرام
+Log "Running instagram_signup.py..."
+try {
+    $pyScript = Join-Path $env:GITHUB_WORKSPACE "instagram_signup.py"
+    python $pyScript 2>&1 | Tee-Object -FilePath $logFile -Append
+    $pyExit = $LASTEXITCODE
+    Log "Python exited with code $pyExit"
+} catch {
+    Log "Python error: $($_.Exception.Message)"
+    $pyExit = 1
+}
 
-$js = @"
-(function(){
-  var el = document.getElementById('$elementSelector');
-  if (!el) return 'NOT_FOUND';
-  el.focus();
-  var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-  setter.call(el, '$nanoAddress');
-  el.dispatchEvent(new Event('input', {bubbles:true}));
-  el.dispatchEvent(new Event('change', {bubbles:true}));
-  el.dispatchEvent(new Event('blur', {bubbles:true}));
-  return 'OK: ' + el.value;
-})()
-"@
+Log "Waiting 3s before stopping FFmpeg..."
+Start-Sleep -Seconds 3
 
-$msg = @{
-    id = 1
-    method = "Runtime.evaluate"
-    params = @{ expression = $js; returnByValue = $true }
-} | ConvertTo-Json -Compress -Depth 10
+if (-not $ffmpegProcess.HasExited) {
+    Log "Stopping FFmpeg (PID $($ffmpegProcess.Id))..."
+    try { taskkill /PID $ffmpegProcess.Id /F | Out-Null } catch {}
+    Start-Sleep -Seconds 4
+} else {
+    Log "FFmpeg already exited."
+}
 
-Log "Sending CDP command..."
+# اسکرین‌شات
+Log "Taking final screenshot..."
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+    $bmp = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($screen.Bounds.X, $screen.Bounds.Y, 0, 0, $bmp.Size)
+    $bmp.Save($screenshotFile, [System.Drawing.Imaging.ImageFormat]::Png)
+    $g.Dispose()
+    $bmp.Dispose()
+    Log "Screenshot saved."
+} catch {
+    Log "Screenshot error: $($_.Exception.Message)"
+}
 
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($msg)
-$seg = New-Object System.ArraySegment[byte] -ArgumentList @(,$bytes)
-$ws.SendAsync($seg, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
+if (Test-Path $videoFile) {
+    $size = (Get-Item $videoFile).Length
+    Log "Video size: $size bytes"
+} else {
+    Log "⚠️  Video file not found"
+}
 
-$buf = New-Object byte[] 16384
-$recvSeg = New-Object System.ArraySegment[byte] -ArgumentList @(,$buf)
-$result = $ws.ReceiveAsync($recvSeg, $ct).Result
-$resp = [System.Text.Encoding]::UTF8.GetString($buf, 0, $result.Count)
-
-Log "CDP Response: $resp"
-
-$ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "done", $ct).Wait()
-$ws.Dispose()
-Log "Typing COMPLETED."
-
-Log "Waiting 10 more seconds..."
-Start-Sleep -Seconds 10
-
-Log "Waiting for FFmpeg..."
-if (-not $ffmpegProcess.HasExited) { $ffmpegProcess.WaitForExit() }
-Log "FFmpeg exit code = $($ffmpegProcess.ExitCode)"
-
-if (-not (Test-Path $videoFile)) { throw "Video missing." }
-Log "Video size = $((Get-Item $videoFile).Length) bytes"
-
-# ==========================================================
-# FINAL SCREENSHOT
-# ==========================================================
-Log "Final screenshot..."
-
-$bitmap = New-Object System.Drawing.Bitmap($width, $height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($screenX, $screenY, 0, 0, $screen.Bounds.Size)
-
-$pen = New-Object System.Drawing.Pen([System.Drawing.Color]::Red, 3)
-$brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(140, 255, 0, 0))
-
-$dotX = [int]($width / 2)
-$dotY = [int]($height / 2)
-$radius = 8
-
-$graphics.FillEllipse($brush, ($dotX - $radius), ($dotY - $radius), ($radius * 2), ($radius * 2))
-$graphics.DrawEllipse($pen, ($dotX - $radius), ($dotY - $radius), ($radius * 2), ($radius * 2))
-
-$bitmap.Save($screenshotFile, [System.Drawing.Imaging.ImageFormat]::Png)
-
-$pen.Dispose()
-$brush.Dispose()
-$graphics.Dispose()
-$bitmap.Dispose()
-
-Log "Screenshot saved."
-Log "ALL COMPLETED"
-exit 0
+Log "Done."
+exit $pyExit
