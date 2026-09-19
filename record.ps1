@@ -1,5 +1,5 @@
 # ==========================================================
-# RECORD + FILL INSTAGRAM SIGNUP FORM
+# RECORD + CLICK + FILL INSTAGRAM SIGNUP FORM
 # ==========================================================
 
 $ErrorActionPreference = "Continue"
@@ -37,18 +37,23 @@ if (-not $ffmpegExe) {
 }
 Log "FFmpeg path: $ffmpegExe"
 
-# ── پیدا کردن و ماکسیمایز کردن پنجره کروم ──
+# ── Native API برای کلیک و ماکسیمایز ──
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class NativeWin {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
     public const int SW_RESTORE = 9;
     public const int SW_MAXIMIZE = 3;
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP   = 0x0004;
 }
 "@
 
+# ── پیدا کردن و ماکسیمایز کردن پنجره کروم ──
 $chromeWindow = $null
 for ($i = 0; $i -lt 20; $i++) {
     $chromeWindow = Get-Process chrome -ErrorAction SilentlyContinue |
@@ -90,9 +95,32 @@ if ($ffmpegExe) {
     Log "FFmpeg not found. Skipping video recording."
 }
 
-# ── CDP: پر کردن فرم اینستاگرام ──
-Log "Waiting 5 seconds before CDP..."
+# ═══════════════════════════════════════════════════════════
+# کلیک فیزیکی روی (84, 614) و بعد ۱۰ ثانیه انتظار
+# ═══════════════════════════════════════════════════════════
+$clickX = 84
+$clickY = 614
+
+Log "Waiting 5 seconds before click..."
 Start-Sleep -Seconds 5
+
+Log "Moving cursor to X=$clickX Y=$clickY..."
+[NativeWin]::SetCursorPos($clickX, $clickY) | Out-Null
+Start-Sleep -Milliseconds 500
+
+Log "Clicking at ($clickX, $clickY)..."
+[NativeWin]::mouse_event([NativeWin]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 150
+[NativeWin]::mouse_event([NativeWin]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+Log "Click COMPLETED."
+
+Log "Waiting 10 seconds after click..."
+Start-Sleep -Seconds 10
+
+# ═══════════════════════════════════════════════════════════
+# CDP: پر کردن فرم اینستاگرام
+# ═══════════════════════════════════════════════════════════
+Log "Starting CDP..."
 
 $email    = "kingkngdbjodbno@llf.com"
 $password = "Kingking00Q)@)"
