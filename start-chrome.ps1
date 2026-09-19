@@ -12,32 +12,28 @@ if (Test-Path $chromeProfile) {
 }
 New-Item -ItemType Directory -Path $chromeProfile -Force | Out-Null
 
-# استفاده از headless=new برای Session 0
-$arguments = @(
-    "--headless=new",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-session-crashed-bubble",
-    "--disable-features=Translate,OptimizationHints",
-    "--disable-blink-features=AutomationControlled",
-    "--window-size=1366,900",
-    "--user-data-dir=$chromeProfile",
-    "--remote-debugging-port=9222",
-    "--remote-debugging-address=127.0.0.1",
-    $targetUrl
-)
+$args1 = "--no-first-run"
+$args2 = "--no-default-browser-check"
+$args3 = "--disable-session-crashed-bubble"
+$args4 = "--disable-features=Translate,OptimizationHints"
+$args5 = "--disable-blink-features=AutomationControlled"
+$args6 = "--start-maximized"
+$args7 = "--user-data-dir=$chromeProfile"
+$args8 = "--remote-debugging-port=9222"
+$args9 = "--remote-debugging-address=127.0.0.1"
 
-Write-Host "Starting Chrome (headless=new)..."
-$chromeProcess = Start-Process -FilePath $chromePath -ArgumentList $arguments -PassThru
+$argList = @($args1, $args2, $args3, $args4, $args5, $args6, $args7, $args8, $args9, $targetUrl)
+
+Write-Host "Starting Chrome..."
+$chromeProcess = Start-Process -FilePath $chromePath -ArgumentList $argList -PassThru
 if ($null -eq $chromeProcess) { throw "Chrome failed to start" }
 Write-Host "Chrome PID: $($chromeProcess.Id)"
 
-# انتظار برای پورت debug
 $ok = $false
-for ($i = 0; $i -lt 30; $i++) {
+for ($i = 0; $i -lt 40; $i++) {
     try {
         $null = Invoke-WebRequest -Uri "http://127.0.0.1:9222/json/version" -UseBasicParsing -TimeoutSec 3
-        Write-Host "✅ Chrome debug ready"
+        Write-Host "Chrome debug ready"
         $ok = $true
         break
     } catch {
