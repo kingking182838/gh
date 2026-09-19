@@ -37,7 +37,7 @@ if (-not $ffmpegExe) {
 }
 Log "FFmpeg path: $ffmpegExe"
 
-# ── پیدا کردن پنجره کروم ──
+# ── پیدا کردن و ماکسیمایز کردن پنجره کروم ──
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -68,8 +68,7 @@ if ($chromeWindow) {
 }
 
 # ═══════════════════════════════════════════════════════════
-# FFmpeg با مدت زمان ۶۰ ثانیه (نه ۲۰)
-# اگر کارها زودتر تمام شد، خودمان FFmpeg را می‌بندیم
+# FFmpeg — ضبط ۶۰ ثانیه، بدون Kill
 # ═══════════════════════════════════════════════════════════
 $ffmpegProcess = $null
 if ($ffmpegExe) {
@@ -198,16 +197,27 @@ try {
     Log "Screenshot failed: $($_.Exception.Message)"
 }
 
-# ── متوقف کردن FFmpeg (اگر هنوز در حال اجراست) ──
-if ($ffmpegProcess -and -not $ffmpegProcess.HasExited) {
-    Log "Stopping FFmpeg gracefully..."
+# ═══════════════════════════════════════════════════════════
+# انتظار طبیعی برای پایان FFmpeg (بدون Kill)
+# ═══════════════════════════════════════════════════════════
+if ($ffmpegProcess) {
+    Log "Waiting for FFmpeg to finish naturally..."
     try {
-        # ارسال 'q' به stdin معمولاً راه درست است، اما اینجا با Kill کار می‌کنیم
-        $ffmpegProcess.Kill()
-        Start-Sleep -Seconds 2
-        Log "FFmpeg killed."
+        $ffmpegProcess.WaitForExit()
+        Log "FFmpeg finished. Exit code = $($ffmpegProcess.ExitCode)"
     } catch {
-        Log "FFmpeg kill failed: $($_.Exception.Message)"
+        Log "FFmpeg wait failed: $($_.Exception.Message)"
+    }
+}
+
+# ── بررسی اندازه فایل‌ها ──
+Log "===== File sizes ====="
+foreach ($f in @($videoFile, $screenshotFile, $ffmpegOutput, $ffmpegError, $logFile)) {
+    if (Test-Path $f) {
+        $size = (Get-Item $f).Length
+        Log "  $f => $size bytes"
+    } else {
+        Log "  $f => MISSING"
     }
 }
 
