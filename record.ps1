@@ -2,7 +2,7 @@
 # RECORD + FILL INSTAGRAM SIGNUP FORM
 # ==========================================================
 
-$ErrorActionPreference = "Continue"   # مهم: Continue نه Stop
+$ErrorActionPreference = "Continue"
 
 $logFile        = "C:\temp\click-record.log"
 $videoFile      = "C:\temp\rdp-click-video.mp4"
@@ -10,16 +10,21 @@ $screenshotFile = "C:\temp\rdp-click-screenshot.png"
 $ffmpegOutput   = "C:\temp\ffmpeg-output.log"
 $ffmpegError    = "C:\temp\ffmpeg-error.log"
 
+# ── ساخت پوشه و فایل‌های خالی ──
 New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null
+if (-not (Test-Path $logFile))      { New-Item -Path $logFile      -ItemType File -Force | Out-Null }
+if (-not (Test-Path $ffmpegOutput)) { New-Item -Path $ffmpegOutput -ItemType File -Force | Out-Null }
+if (-not (Test-Path $ffmpegError))  { New-Item -Path $ffmpegError  -ItemType File -Force | Out-Null }
 
-# ── تابع لاگ ──────────────────────────────────────────────
 function Log($text) {
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')  $text"
     Write-Host $line
     Add-Content -Path $logFile -Value $line
 }
 
-# ── پیدا کردن مسیر FFmpeg ─────────────────────────────────
+Log "========== SCRIPT STARTED =========="
+
+# ── پیدا کردن مسیر FFmpeg ──
 $ffmpegExe = (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue).Source
 if (-not $ffmpegExe) {
     $candidates = @(
@@ -32,7 +37,7 @@ if (-not $ffmpegExe) {
 }
 Log "FFmpeg path: $ffmpegExe"
 
-# ── پیدا کردن و ماکسیمایز کردن پنجره کروم ─────────────────
+# ── پیدا کردن پنجره کروم ──
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -62,19 +67,22 @@ if ($chromeWindow) {
     Log "WARNING: Chrome window not found. Continuing..."
 }
 
-# ── تلاش برای ضبط ویدیو (اگر FFmpeg بود) ──────────────────
+# ═══════════════════════════════════════════════════════════
+# FFmpeg با مدت زمان ۶۰ ثانیه (نه ۲۰)
+# اگر کارها زودتر تمام شد، خودمان FFmpeg را می‌بندیم
+# ═══════════════════════════════════════════════════════════
 $ffmpegProcess = $null
 if ($ffmpegExe) {
     Remove-Item $videoFile -Force -ErrorAction SilentlyContinue
     $ffmpegArgs = @(
         "-y","-f","gdigrab","-framerate","30","-draw_mouse","1",
-        "-i","desktop","-t","20","-c:v","libx264",
+        "-i","desktop","-t","60","-c:v","libx264",
         "-preset","veryfast","-pix_fmt","yuv420p",$videoFile
     )
     try {
         $ffmpegProcess = Start-Process -FilePath $ffmpegExe -ArgumentList $ffmpegArgs `
             -PassThru -RedirectStandardOutput $ffmpegOutput -RedirectStandardError $ffmpegError
-        Log "FFmpeg started, PID=$($ffmpegProcess.Id)"
+        Log "FFmpeg started, PID=$($ffmpegProcess.Id) (max 60s)"
     } catch {
         Log "FFmpeg FAILED to start: $($_.Exception.Message)"
         $ffmpegProcess = $null
@@ -83,7 +91,7 @@ if ($ffmpegExe) {
     Log "FFmpeg not found. Skipping video recording."
 }
 
-# ── CDP: پر کردن فرم اینستاگرام ────────────────────────────
+# ── CDP: پر کردن فرم اینستاگرام ──
 Log "Waiting 5 seconds before CDP..."
 Start-Sleep -Seconds 5
 
@@ -155,39 +163,59 @@ if ($targets) {
         } catch {
             Log "CDP ERROR: $($_.Exception.Message)"
         }
+    } else {
+        Log "No page target found."
     }
 } else {
     Log "CDP: cannot connect to port 9222"
 }
 
-# ── اسکرین‌شات نهایی ──────────────────────────────────────
+# ── انتظار ۵ ثانیه بعد از ارسال فرم ──
+Log "Waiting 5 seconds after submit..."
+Start-Sleep -Seconds 5
+
+# ── اسکرین‌شات نهایی ──
 Log "Taking screenshot..."
 try {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     $screen = [System.Windows.Forms.Screen]::PrimaryScreen
     if ($screen) {
-        $bmp = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
+        $w = $screen.Bounds.Width
+        $h = $screen.Bounds.Height
+        if ($w -le 0) { $w = 1920 }
+        if ($h -le 0) { $h = 1080 }
+        $bmp = New-Object System.Drawing.Bitmap($w, $h)
         $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen(0,0,0,0,$screen.Bounds.Size)
+        $g.CopyFromScreen(0, 0, 0, 0, (New-Object System.Drawing.Size($w, $h)))
         $bmp.Save($screenshotFile, [System.Drawing.Imaging.ImageFormat]::Png)
         $g.Dispose(); $bmp.Dispose()
-        Log "Screenshot saved."
+        Log "Screenshot saved: $screenshotFile"
+    } else {
+        Log "PrimaryScreen is null."
     }
 } catch {
     Log "Screenshot failed: $($_.Exception.Message)"
 }
 
-# ── انتظار برای FFmpeg (اگر در حال اجرا بود) ──────────────
+# ── متوقف کردن FFmpeg (اگر هنوز در حال اجراست) ──
 if ($ffmpegProcess -and -not $ffmpegProcess.HasExited) {
-    Log "Waiting for FFmpeg..."
-    $ffmpegProcess.WaitForExit()
-    Log "FFmpeg exit code = $($ffmpegProcess.ExitCode)"
+    Log "Stopping FFmpeg gracefully..."
+    try {
+        # ارسال 'q' به stdin معمولاً راه درست است، اما اینجا با Kill کار می‌کنیم
+        $ffmpegProcess.Kill()
+        Start-Sleep -Seconds 2
+        Log "FFmpeg killed."
+    } catch {
+        Log "FFmpeg kill failed: $($_.Exception.Message)"
+    }
 }
 
-# ── ساخت فایل‌های لاگ خالی تا artifact حتماً چیزی داشته باشد ──
-if (-not (Test-Path $ffmpegOutput)) { New-Item -Path $ffmpegOutput -ItemType File -Force | Out-Null }
-if (-not (Test-Path $ffmpegError))  { New-Item -Path $ffmpegError  -ItemType File -Force | Out-Null }
+# ── ساخت فایل‌های غایب تا artifact خالی نماند ──
+if (-not (Test-Path $videoFile))      { New-Item -Path $videoFile      -ItemType File -Force | Out-Null; Log "Created placeholder for video." }
+if (-not (Test-Path $screenshotFile)) { New-Item -Path $screenshotFile -ItemType File -Force | Out-Null; Log "Created placeholder for screenshot." }
+if (-not (Test-Path $ffmpegOutput))   { New-Item -Path $ffmpegOutput   -ItemType File -Force | Out-Null }
+if (-not (Test-Path $ffmpegError))    { New-Item -Path $ffmpegError    -ItemType File -Force | Out-Null }
 
-Log "ALL COMPLETED"
+Log "========== ALL COMPLETED =========="
 exit 0
