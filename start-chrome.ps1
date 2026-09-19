@@ -5,39 +5,49 @@ if ([string]::IsNullOrWhiteSpace($chromePath)) { throw "CHROME_PATH empty" }
 if (-not (Test-Path $chromePath)) { throw "Chrome exe not found" }
 
 $chromeProfile = "C:\temp\ChromeProfile"
-$targetUrl = "about:blank"
+$targetUrl = "https://www.instagram.com/accounts/emailsignup/?hl=en"
 
-if (Test-Path $chromeProfile) {
-    Remove-Item $chromeProfile -Recurse -Force -ErrorAction SilentlyContinue
-}
-New-Item -ItemType Directory -Path $chromeProfile -Force | Out-Null
-
-$args1 = "--no-first-run"
-$args2 = "--no-default-browser-check"
-$args3 = "--disable-session-crashed-bubble"
-$args4 = "--disable-features=Translate,OptimizationHints"
-$args5 = "--disable-blink-features=AutomationControlled"
-$args6 = "--start-maximized"
-$args7 = "--user-data-dir=$chromeProfile"
-$args8 = "--remote-debugging-port=9222"
-$args9 = "--remote-debugging-address=127.0.0.1"
-
-$argList = @($args1, $args2, $args3, $args4, $args5, $args6, $args7, $args8, $args9, $targetUrl)
+$arguments = @(
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-session-crashed-bubble",
+    "--disable-features=Translate",
+    "--start-maximized",
+    "--new-window",
+    "--user-data-dir=$chromeProfile",
+    "--remote-debugging-port=9222",
+    $targetUrl
+)
 
 Write-Host "Starting Chrome..."
-$chromeProcess = Start-Process -FilePath $chromePath -ArgumentList $argList -PassThru
+Write-Host "URL: $targetUrl"
+
+$chromeProcess = Start-Process -FilePath $chromePath -ArgumentList $arguments -PassThru
 if ($null -eq $chromeProcess) { throw "Chrome failed to start" }
 Write-Host "Chrome PID: $($chromeProcess.Id)"
 
-$ok = $false
-for ($i = 0; $i -lt 40; $i++) {
-    try {
-        $null = Invoke-WebRequest -Uri "http://127.0.0.1:9222/json/version" -UseBasicParsing -TimeoutSec 3
-        Write-Host "Chrome debug ready"
-        $ok = $true
-        break
-    } catch {
-        Start-Sleep -Milliseconds 500
-    }
+Start-Sleep -Seconds 10
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class ChromeWindow {
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    public const int SW_MAXIMIZE = 3;
 }
-if (-not $ok) { throw "Chrome debug port 9222 not reachable" }
+"@
+
+$chromeWindow = Get-Process chrome -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowHandle -ne 0 } |
+    Sort-Object StartTime -Descending |
+    Select-Object -First 1
+
+if ($null -eq $chromeWindow) { throw "Chrome window not found" }
+
+[ChromeWindow]::ShowWindow($chromeWindow.MainWindowHandle, [ChromeWindow]::SW_MAXIMIZE) | Out-Null
+Start-Sleep -Milliseconds 800
+[ChromeWindow]::SetForegroundWindow($chromeWindow.MainWindowHandle) | Out-Null
+Start-Sleep -Seconds 2
+
+Write-Host "Chrome maximized."
