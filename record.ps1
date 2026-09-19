@@ -1,5 +1,5 @@
 # ==========================================================
-# RECORD + CLICK + FILL INSTAGRAM SIGNUP FORM
+# BRING CHROME TO FRONT + FILL INSTAGRAM SIGNUP FORM
 # ==========================================================
 
 $ErrorActionPreference = "Continue"
@@ -24,7 +24,129 @@ function Log($text) {
 
 Log "========== SCRIPT STARTED =========="
 
-# ── پیدا کردن مسیر FFmpeg ──
+# ── Native API قوی برای foreground کردن پنجره ──
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class NativeWin {
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+    public const int SW_RESTORE = 9;
+    public const int SW_MAXIMIZE = 3;
+    public const int SW_SHOW = 5;
+    public static readonly IntPtr HWND_TOP = new IntPtr(0);
+    public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_SHOWWINDOW = 0x0040;
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP   = 0x0004;
+}
+"@
+
+# ═══════════════════════════════════════════════════════════
+# تابع قوی برای آوردن کروم به جلو
+# ═══════════════════════════════════════════════════════════
+function ForceChromeToFront {
+    param([int]$MaxAttempts = 10)
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+
+        # پیدا کردن پنجره اصلی کروم
+        $proc = Get-Process chrome -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowHandle -ne 0 } |
+            Sort-Object StartTime -Descending | Select-Object -First 1
+
+        if (-not $proc) {
+            Log "  [attempt $attempt] Chrome window not found yet..."
+            Start-Sleep -Milliseconds 800
+            continue
+        }
+
+        $hwnd = $proc.MainWindowHandle
+
+        # روش ۱: ShowWindow + BringWindowToTop + SetForegroundWindow
+        [NativeWin]::ShowWindow($hwnd, [NativeWin]::SW_RESTORE) | Out-Null
+        Start-Sleep -Milliseconds 200
+        [NativeWin]::ShowWindow($hwnd, [NativeWin]::SW_MAXIMIZE) | Out-Null
+        Start-Sleep -Milliseconds 300
+        [NativeWin]::BringWindowToTop($hwnd) | Out-Null
+        [NativeWin]::SetWindowPos($hwnd, [NativeWin]::HWND_TOPMOST, 0, 0, 0, 0,
+            ([NativeWin]::SWP_NOMOVE -bor [NativeWin]::SWP_NOSIZE -bor [NativeWin]::SWP_SHOWWINDOW)) | Out-Null
+        [NativeWin]::SetWindowPos($hwnd, [NativeWin]::HWND_TOP, 0, 0, 0, 0,
+            ([NativeWin]::SWP_NOMOVE -bor [NativeWin]::SWP_NOSIZE -bor [NativeWin]::SWP_SHOWWINDOW)) | Out-Null
+        [NativeWin]::SetForegroundWindow($hwnd) | Out-Null
+        Start-Sleep -Milliseconds 400
+
+        # روش ۲: AttachThreadInput برای دور زدن محدودیت SetForegroundWindow
+        try {
+            $fgHwnd = [NativeWin]::GetForegroundWindow()
+            $fgPid = 0
+            [NativeWin]::GetWindowThreadProcessId($fgHwnd, [ref]$fgPid) | Out-Null
+            $currentThread = [NativeWin]::GetCurrentThreadId()
+            $targetThread = [NativeWin]::GetWindowThreadProcessId($hwnd, [ref]$fgPid)
+
+            if ($currentThread -ne $targetThread) {
+                [NativeWin]::AttachThreadInput($currentThread, $targetThread, $true) | Out-Null
+                [NativeWin]::SetForegroundWindow($hwnd) | Out-Null
+                [NativeWin]::AttachThreadInput($currentThread, $targetThread, $false) | Out-Null
+            }
+        } catch { }
+
+        # روش ۳: WScript.Shell AppActivate به عنوان fallback
+        try {
+            $wshell = New-Object -ComObject WScript.Shell
+            $wshell.AppActivate($proc.Id) | Out-Null
+        } catch { }
+
+        Start-Sleep -Milliseconds 500
+
+        # بررسی اینکه آیا کروم واقعاً foreground شده
+        $fgNow = [NativeWin]::GetForegroundWindow()
+        if ($fgNow -eq $hwnd) {
+            Log "  [attempt $attempt] Chrome is now FOREGROUND ✓"
+            return $true
+        }
+
+        Log "  [attempt $attempt] Chrome not in foreground yet, retrying..."
+        Start-Sleep -Milliseconds 500
+    }
+
+    Log "  WARNING: Could not force Chrome to foreground after $MaxAttempts attempts."
+    return $false
+}
+
+# ═══════════════════════════════════════════════════════════
+# مرحله ۱: منتظر باز شدن کروم می‌مانیم و آن را به جلو می‌آوریم
+# ═══════════════════════════════════════════════════════════
+Log "Waiting for Chrome to appear..."
+Start-Sleep -Seconds 3
+ForceChromeToFront | Out-Null
+Log "Chrome brought to front (initial)."
+
+# ═══════════════════════════════════════════════════════════
+# مرحله ۲: انتظار برای لود کامل شدن صفحه اینستاگرام
+# ═══════════════════════════════════════════════════════════
+Log "Waiting 15 seconds for Instagram page to load..."
+Start-Sleep -Seconds 15
+
+# دوباره مطمئن شو کروم جلو هست
+ForceChromeToFront | Out-Null
+Log "Chrome re-focused after page load."
+
+# ═══════════════════════════════════════════════════════════
+# مرحله ۳: شروع FFmpeg در حالت مخفی
+# ═══════════════════════════════════════════════════════════
 $ffmpegExe = (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue).Source
 if (-not $ffmpegExe) {
     $candidates = @(
@@ -37,44 +159,6 @@ if (-not $ffmpegExe) {
 }
 Log "FFmpeg path: $ffmpegExe"
 
-# ── Native API برای کلیک و ماکسیمایز ──
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class NativeWin {
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
-    public const int SW_RESTORE = 9;
-    public const int SW_MAXIMIZE = 3;
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP   = 0x0004;
-}
-"@
-
-# ── پیدا کردن و ماکسیمایز کردن پنجره کروم ──
-$chromeWindow = $null
-for ($i = 0; $i -lt 20; $i++) {
-    $chromeWindow = Get-Process chrome -ErrorAction SilentlyContinue |
-        Where-Object { $_.MainWindowHandle -ne 0 } |
-        Sort-Object StartTime -Descending | Select-Object -First 1
-    if ($chromeWindow) { break }
-    Start-Sleep -Milliseconds 500
-}
-
-if ($chromeWindow) {
-    [NativeWin]::ShowWindow($chromeWindow.MainWindowHandle, [NativeWin]::SW_MAXIMIZE) | Out-Null
-    Start-Sleep -Milliseconds 500
-    [NativeWin]::SetForegroundWindow($chromeWindow.MainWindowHandle) | Out-Null
-    Log "Chrome maximized."
-} else {
-    Log "WARNING: Chrome window not found. Continuing..."
-}
-
-# ═══════════════════════════════════════════════════════════
-# FFmpeg — ضبط ۶۰ ثانیه، بدون Kill
-# ═══════════════════════════════════════════════════════════
 $ffmpegProcess = $null
 if ($ffmpegExe) {
     Remove-Item $videoFile -Force -ErrorAction SilentlyContinue
@@ -85,8 +169,9 @@ if ($ffmpegExe) {
     )
     try {
         $ffmpegProcess = Start-Process -FilePath $ffmpegExe -ArgumentList $ffmpegArgs `
-            -PassThru -RedirectStandardOutput $ffmpegOutput -RedirectStandardError $ffmpegError
-        Log "FFmpeg started, PID=$($ffmpegProcess.Id) (max 60s)"
+            -PassThru -RedirectStandardOutput $ffmpegOutput -RedirectStandardError $ffmpegError `
+            -WindowStyle Hidden
+        Log "FFmpeg started (hidden), PID=$($ffmpegProcess.Id)"
     } catch {
         Log "FFmpeg FAILED to start: $($_.Exception.Message)"
         $ffmpegProcess = $null
@@ -95,14 +180,17 @@ if ($ffmpegExe) {
     Log "FFmpeg not found. Skipping video recording."
 }
 
+# بعد از شروع FFmpeg دوباره کروم را به جلو بیاور
+Start-Sleep -Seconds 2
+ForceChromeToFront | Out-Null
+Log "Chrome re-focused after FFmpeg start."
+Start-Sleep -Seconds 2
+
 # ═══════════════════════════════════════════════════════════
-# کلیک فیزیکی روی (84, 614) و بعد ۱۰ ثانیه انتظار
+# مرحله ۴: کلیک فیزیکی روی (84, 614)
 # ═══════════════════════════════════════════════════════════
 $clickX = 84
 $clickY = 614
-
-Log "Waiting 5 seconds before click..."
-Start-Sleep -Seconds 5
 
 Log "Moving cursor to X=$clickX Y=$clickY..."
 [NativeWin]::SetCursorPos($clickX, $clickY) | Out-Null
@@ -118,7 +206,7 @@ Log "Waiting 10 seconds after click..."
 Start-Sleep -Seconds 10
 
 # ═══════════════════════════════════════════════════════════
-# CDP: پر کردن فرم اینستاگرام
+# مرحله ۵: CDP — پر کردن فرم
 # ═══════════════════════════════════════════════════════════
 Log "Starting CDP..."
 
@@ -201,7 +289,9 @@ if ($targets) {
 Log "Waiting 5 seconds after submit..."
 Start-Sleep -Seconds 5
 
-# ── اسکرین‌شات نهایی ──
+# ═══════════════════════════════════════════════════════════
+# مرحله ۶: اسکرین‌شات
+# ═══════════════════════════════════════════════════════════
 Log "Taking screenshot..."
 try {
     Add-Type -AssemblyName System.Windows.Forms
@@ -225,9 +315,7 @@ try {
     Log "Screenshot failed: $($_.Exception.Message)"
 }
 
-# ═══════════════════════════════════════════════════════════
-# انتظار طبیعی برای پایان FFmpeg (بدون Kill)
-# ═══════════════════════════════════════════════════════════
+# ── انتظار برای پایان FFmpeg ──
 if ($ffmpegProcess) {
     Log "Waiting for FFmpeg to finish naturally..."
     try {
@@ -249,7 +337,7 @@ foreach ($f in @($videoFile, $screenshotFile, $ffmpegOutput, $ffmpegError, $logF
     }
 }
 
-# ── ساخت فایل‌های غایب تا artifact خالی نماند ──
+# ── ساخت فایل‌های غایب ──
 if (-not (Test-Path $videoFile))      { New-Item -Path $videoFile      -ItemType File -Force | Out-Null; Log "Created placeholder for video." }
 if (-not (Test-Path $screenshotFile)) { New-Item -Path $screenshotFile -ItemType File -Force | Out-Null; Log "Created placeholder for screenshot." }
 if (-not (Test-Path $ffmpegOutput))   { New-Item -Path $ffmpegOutput   -ItemType File -Force | Out-Null }
