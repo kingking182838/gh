@@ -1,94 +1,118 @@
-$ErrorActionPreference = "Stop"
+# ==========================================================
+# FILL INSTAGRAM SIGNUP FORM VIA CDP
+# ==========================================================
 
-$logFile   = "C:\temp\click-record.log"
-$videoMp4  = "C:\temp\rdp-click-video.mp4"
-$framesDir = "C:\temp\frames"
-$ffOut     = "C:\temp\ffmpeg-output.log"
-$ffErr     = "C:\temp\ffmpeg-error.log"
+$email    = "kingkngdbjodbno@llf.com"
+$password = "Kingking00Q)@)"
+$fullname = "fjofjinoervnervnioernvemoe"
+$username = "klfeir"
+$month    = "1"
+$day      = "1"
+$year     = "1999"
 
-function Log($text) {
-    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $text"
-    Write-Host $line
-    Add-Content -Path $logFile -Value $line -Encoding utf8
-}
+Log "Connecting to Chrome DevTools..."
 
-Remove-Item $logFile -Force -ErrorAction SilentlyContinue
-Remove-Item $videoMp4 -Force -ErrorAction SilentlyContinue
-Remove-Item $ffOut -Force -ErrorAction SilentlyContinue
-Remove-Item $ffErr -Force -ErrorAction SilentlyContinue
-Remove-Item $framesDir -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Path $framesDir -Force | Out-Null
-
-Log "Checking Chrome debug port..."
-$ok = $false
+$targets = $null
 for ($i = 0; $i -lt 20; $i++) {
     try {
-        $null = Invoke-WebRequest -Uri "http://127.0.0.1:9222/json/version" -UseBasicParsing -TimeoutSec 3
-        $ok = $true
-        break
-    } catch {
-        Start-Sleep -Milliseconds 500
-    }
+        $targets = Invoke-RestMethod "http://localhost:9222/json"
+        if ($targets) { break }
+    } catch {}
+    Start-Sleep -Milliseconds 500
 }
-if (-not $ok) { throw "Chrome debug port not reachable" }
-Log "Chrome debug OK"
+if (-not $targets) { throw "Cannot connect to debug port 9222" }
 
-Log "Starting FFmpeg..."
-$ffArgs = @(
-    "-y",
-    "-f", "gdigrab",
-    "-framerate", "15",
-    "-draw_mouse", "1",
-    "-i", "desktop",
-    "-t", "300",
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-pix_fmt", "yuv420p",
-    $videoMp4
-)
+$page = $targets | Where-Object { $_.type -eq 'page' } | Select-Object -First 1
+if (-not $page) { throw "No active page" }
+Log "Page: $($page.url)"
 
-$ffProc = Start-Process -FilePath "ffmpeg.exe" -ArgumentList $ffArgs -PassThru -RedirectStandardOutput $ffOut -RedirectStandardError $ffErr
-Log "FFmpeg PID: $($ffProc.Id)"
-Start-Sleep -Seconds 3
+$wsUrl = $page.webSocketDebuggerUrl
+Log "WS: $wsUrl"
 
-Log "Running instagram_signup.py..."
-$pyScript = Join-Path $env:GITHUB_WORKSPACE "instagram_signup.py"
-python $pyScript 2>&1 | Tee-Object -FilePath $logFile -Append
-$pyExit = $LASTEXITCODE
-Log "Python exit code: $pyExit"
+$ws = New-Object System.Net.WebSockets.ClientWebSocket
+$ct = [System.Threading.CancellationToken]::None
+$ws.ConnectAsync([Uri]$wsUrl, $ct).Wait()
+Log "WS connected."
 
-if ($null -ne $ffProc -and -not $ffProc.HasExited) {
-    Log "Stopping FFmpeg..."
-    try {
-        taskkill /PID $ffProc.Id /F 2>&1 | Out-Null
-    } catch {
-        Log "taskkill failed"
+$js = @"
+(function(){
+  function setNative(el, value){
+    if(!el) return false;
+    var proto = el.tagName==='SELECT' ? window.HTMLSelectElement.prototype :
+                el.tagName==='TEXTAREA' ? window.HTMLTextAreaElement.prototype :
+                window.HTMLInputElement.prototype;
+    var setter = Object.getOwnPropertyDescriptor(proto,'value').set;
+    setter.call(el, value);
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    el.dispatchEvent(new Event('change',{bubbles:true}));
+    el.dispatchEvent(new Event('blur',{bubbles:true}));
+    return true;
+  }
+  var r = [];
+
+  // Email
+  var el = document.querySelector("input[name='email']")
+        || document.querySelector("input[aria-label='Mobile number or email']");
+  r.push('email:' + (setNative(el, '$email') ? 'OK' : 'FAIL'));
+
+  // Password
+  el = document.querySelector("input[type='password']");
+  r.push('pass:' + (setNative(el, '$password') ? 'OK' : 'FAIL'));
+
+  // Full name
+  el = document.querySelector("input[name='fullName']")
+    || document.querySelector("input[aria-label='Full name']");
+  r.push('name:' + (setNative(el, '$fullname') ? 'OK' : 'FAIL'));
+
+  // Username
+  el = document.querySelector("input[name='username']")
+    || document.querySelector("input[aria-label='Username']");
+  r.push('user:' + (setNative(el, '$username') ? 'OK' : 'FAIL'));
+
+  // Dropdowns (select مخفی)
+  var mSel = document.querySelector("select[title='Month']") || document.querySelector("select[name='month']");
+  r.push('month:' + (setNative(mSel, '$month') ? 'OK' : 'FAIL'));
+
+  var dSel = document.querySelector("select[title='Day']") || document.querySelector("select[name='day']");
+  r.push('day:' + (setNative(dSel, '$day') ? 'OK' : 'FAIL'));
+
+  var ySel = document.querySelector("select[title='Year']") || document.querySelector("select[name='year']");
+  r.push('year:' + (setNative(ySel, '$year') ? 'OK' : 'FAIL'));
+
+  // Submit
+  var submit = document.querySelector("button[type='submit']");
+  if(!submit){
+    var all = document.querySelectorAll("div[role='button'], button");
+    for(var i=0;i<all.length;i++){
+      if(all[i].innerText && all[i].innerText.trim()==='Submit'){ submit = all[i]; break; }
     }
-    Start-Sleep -Seconds 3
-}
+  }
+  if(submit){ submit.click(); r.push('submit:CLICKED'); }
+  else { r.push('submit:FAIL'); }
 
-$videoSize = 0
-if (Test-Path $videoMp4) {
-    $videoSize = (Get-Item $videoMp4).Length
-}
-Log "Video size: $videoSize bytes"
+  return r.join(' | ');
+})()
+"@
 
-if ($videoSize -eq 0) {
-    Log "FFmpeg produced no video - trying frame fallback"
-    $frames = Get-ChildItem $framesDir -Filter *.png -ErrorAction SilentlyContinue
-    $frameCount = 0
-    if ($null -ne $frames) {
-        $frameCount = ($frames | Measure-Object).Count
-    }
-    Log "Frame count: $frameCount"
-    if ($frameCount -gt 0) {
-        $framePattern = Join-Path $framesDir "frame_%05d.png"
-        ffmpeg -y -framerate 2 -i $framePattern -c:v libx264 -pix_fmt yuv420p -movflags +faststart $videoMp4 2>&1 | Out-Null
-        if (Test-Path $videoMp4) {
-            Log "Fallback video size: $((Get-Item $videoMp4).Length) bytes"
-        }
-    }
-}
+$msg = @{
+    id = 1
+    method = "Runtime.evaluate"
+    params = @{ expression = $js; returnByValue = $true }
+} | ConvertTo-Json -Compress -Depth 10
 
-Log "Done"
-exit $pyExit
+Log "Sending CDP command..."
+
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($msg)
+$seg = New-Object System.ArraySegment[byte] -ArgumentList @(,$bytes)
+$ws.SendAsync($seg, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
+
+$buf = New-Object byte[] 16384
+$recvSeg = New-Object System.ArraySegment[byte] -ArgumentList @(,$buf)
+$result = $ws.ReceiveAsync($recvSeg, $ct).Result
+$resp = [System.Text.Encoding]::UTF8.GetString($buf, 0, $result.Count)
+
+Log "CDP Response: $resp"
+
+$ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "done", $ct).Wait()
+$ws.Dispose()
+Log "Typing COMPLETED."
