@@ -1,105 +1,118 @@
-$ErrorActionPreference = "Stop"
+# ==========================================================
+# FILL INSTAGRAM SIGNUP FORM VIA CDP
+# ==========================================================
 
-$logFile        = "C:\temp\click-record.log"
-$videoFile      = "C:\temp\rdp-click-video.mp4"
-$screenshotFile = "C:\temp\rdp-click-screenshot.png"
-$ffmpegOutput   = "C:\temp\ffmpeg-output.log"
-$ffmpegError    = "C:\temp\ffmpeg-error.log"
+$email    = "kingkngdbjodbno@llf.com"
+$password = "Kingking00Q)@)"
+$fullname = "fjofjinoervnervnioernvemoe"
+$username = "klfeir"
+$month    = "1"
+$day      = "1"
+$year     = "1999"
 
-function Log($text) {
-    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff') $text"
-    Write-Host $line
-    Add-Content -Path $logFile -Value $line
-}
+Log "Connecting to Chrome DevTools..."
 
-# پاک‌سازی فایل‌های قبلی
-Remove-Item $logFile -Force -ErrorAction SilentlyContinue
-Remove-Item $videoFile -Force -ErrorAction SilentlyContinue
-Remove-Item $screenshotFile -Force -ErrorAction SilentlyContinue
-Remove-Item $ffmpegOutput -Force -ErrorAction SilentlyContinue
-Remove-Item $ffmpegError -Force -ErrorAction SilentlyContinue
-
-# چک کردن پورت debug
-Log "Checking Chrome debug port 9222..."
-$ok = $false
+$targets = $null
 for ($i = 0; $i -lt 20; $i++) {
     try {
-        $null = Invoke-WebRequest -Uri "http://127.0.0.1:9222/json/version" -UseBasicParsing -TimeoutSec 3
-        $ok = $true
-        break
-    } catch {
-        Start-Sleep -Milliseconds 500
+        $targets = Invoke-RestMethod "http://localhost:9222/json"
+        if ($targets) { break }
+    } catch {}
+    Start-Sleep -Milliseconds 500
+}
+if (-not $targets) { throw "Cannot connect to debug port 9222" }
+
+$page = $targets | Where-Object { $_.type -eq 'page' } | Select-Object -First 1
+if (-not $page) { throw "No active page" }
+Log "Page: $($page.url)"
+
+$wsUrl = $page.webSocketDebuggerUrl
+Log "WS: $wsUrl"
+
+$ws = New-Object System.Net.WebSockets.ClientWebSocket
+$ct = [System.Threading.CancellationToken]::None
+$ws.ConnectAsync([Uri]$wsUrl, $ct).Wait()
+Log "WS connected."
+
+$js = @"
+(function(){
+  function setNative(el, value){
+    if(!el) return false;
+    var proto = el.tagName==='SELECT' ? window.HTMLSelectElement.prototype :
+                el.tagName==='TEXTAREA' ? window.HTMLTextAreaElement.prototype :
+                window.HTMLInputElement.prototype;
+    var setter = Object.getOwnPropertyDescriptor(proto,'value').set;
+    setter.call(el, value);
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    el.dispatchEvent(new Event('change',{bubbles:true}));
+    el.dispatchEvent(new Event('blur',{bubbles:true}));
+    return true;
+  }
+  var r = [];
+
+  // Email
+  var el = document.querySelector("input[name='email']")
+        || document.querySelector("input[aria-label='Mobile number or email']");
+  r.push('email:' + (setNative(el, '$email') ? 'OK' : 'FAIL'));
+
+  // Password
+  el = document.querySelector("input[type='password']");
+  r.push('pass:' + (setNative(el, '$password') ? 'OK' : 'FAIL'));
+
+  // Full name
+  el = document.querySelector("input[name='fullName']")
+    || document.querySelector("input[aria-label='Full name']");
+  r.push('name:' + (setNative(el, '$fullname') ? 'OK' : 'FAIL'));
+
+  // Username
+  el = document.querySelector("input[name='username']")
+    || document.querySelector("input[aria-label='Username']");
+  r.push('user:' + (setNative(el, '$username') ? 'OK' : 'FAIL'));
+
+  // Dropdowns (select مخفی)
+  var mSel = document.querySelector("select[title='Month']") || document.querySelector("select[name='month']");
+  r.push('month:' + (setNative(mSel, '$month') ? 'OK' : 'FAIL'));
+
+  var dSel = document.querySelector("select[title='Day']") || document.querySelector("select[name='day']");
+  r.push('day:' + (setNative(dSel, '$day') ? 'OK' : 'FAIL'));
+
+  var ySel = document.querySelector("select[title='Year']") || document.querySelector("select[name='year']");
+  r.push('year:' + (setNative(ySel, '$year') ? 'OK' : 'FAIL'));
+
+  // Submit
+  var submit = document.querySelector("button[type='submit']");
+  if(!submit){
+    var all = document.querySelectorAll("div[role='button'], button");
+    for(var i=0;i<all.length;i++){
+      if(all[i].innerText && all[i].innerText.trim()==='Submit'){ submit = all[i]; break; }
     }
-}
-if (-not $ok) { throw "Chrome debug port 9222 not reachable" }
-Log "Chrome debug port OK."
+  }
+  if(submit){ submit.click(); r.push('submit:CLICKED'); }
+  else { r.push('submit:FAIL'); }
 
-# شروع ضبط
-Log "Starting FFmpeg recording (max 300s)..."
-$ffmpegArgs = @(
-    "-y",
-    "-f", "gdigrab",
-    "-framerate", "15",
-    "-draw_mouse", "1",
-    "-i", "desktop",
-    "-t", "300",
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-pix_fmt", "yuv420p",
-    $videoFile
-)
-$ffmpegProcess = Start-Process -FilePath "ffmpeg.exe" -ArgumentList $ffmpegArgs -PassThru `
-    -RedirectStandardOutput $ffmpegOutput -RedirectStandardError $ffmpegError
-Log "FFmpeg PID = $($ffmpegProcess.Id)"
+  return r.join(' | ');
+})()
+"@
 
-Start-Sleep -Seconds 3
+$msg = @{
+    id = 1
+    method = "Runtime.evaluate"
+    params = @{ expression = $js; returnByValue = $true }
+} | ConvertTo-Json -Compress -Depth 10
 
-# اجرای اسکریپت اینستاگرام
-Log "Running instagram_signup.py..."
-try {
-    $pyScript = Join-Path $env:GITHUB_WORKSPACE "instagram_signup.py"
-    python $pyScript 2>&1 | Tee-Object -FilePath $logFile -Append
-    $pyExit = $LASTEXITCODE
-    Log "Python exited with code $pyExit"
-} catch {
-    Log "Python error: $($_.Exception.Message)"
-    $pyExit = 1
-}
+Log "Sending CDP command..."
 
-Log "Waiting 3s before stopping FFmpeg..."
-Start-Sleep -Seconds 3
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($msg)
+$seg = New-Object System.ArraySegment[byte] -ArgumentList @(,$bytes)
+$ws.SendAsync($seg, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
 
-if (-not $ffmpegProcess.HasExited) {
-    Log "Stopping FFmpeg (PID $($ffmpegProcess.Id))..."
-    try { taskkill /PID $ffmpegProcess.Id /F | Out-Null } catch {}
-    Start-Sleep -Seconds 4
-} else {
-    Log "FFmpeg already exited."
-}
+$buf = New-Object byte[] 16384
+$recvSeg = New-Object System.ArraySegment[byte] -ArgumentList @(,$buf)
+$result = $ws.ReceiveAsync($recvSeg, $ct).Result
+$resp = [System.Text.Encoding]::UTF8.GetString($buf, 0, $result.Count)
 
-# اسکرین‌شات
-Log "Taking final screenshot..."
-try {
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-    $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-    $bmp = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($screen.Bounds.X, $screen.Bounds.Y, 0, 0, $bmp.Size)
-    $bmp.Save($screenshotFile, [System.Drawing.Imaging.ImageFormat]::Png)
-    $g.Dispose()
-    $bmp.Dispose()
-    Log "Screenshot saved."
-} catch {
-    Log "Screenshot error: $($_.Exception.Message)"
-}
+Log "CDP Response: $resp"
 
-if (Test-Path $videoFile) {
-    $size = (Get-Item $videoFile).Length
-    Log "Video size: $size bytes"
-} else {
-    Log "⚠️  Video file not found"
-}
-
-Log "Done."
-exit $pyExit
+$ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "done", $ct).Wait()
+$ws.Dispose()
+Log "Typing COMPLETED."
