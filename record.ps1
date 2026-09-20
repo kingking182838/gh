@@ -10,7 +10,6 @@ $screenshotFile = "C:\temp\rdp-click-screenshot.png"
 $ffmpegOutput   = "C:\temp\ffmpeg-output.log"
 $ffmpegError    = "C:\temp\ffmpeg-error.log"
 
-# ── ساخت پوشه و فایل‌های خالی ──
 New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null
 if (-not (Test-Path $logFile))      { New-Item -Path $logFile      -ItemType File -Force | Out-Null }
 if (-not (Test-Path $ffmpegOutput)) { New-Item -Path $ffmpegOutput -ItemType File -Force | Out-Null }
@@ -24,7 +23,6 @@ function Log($text) {
 
 Log "========== SCRIPT STARTED =========="
 
-# ── Native API قوی برای foreground کردن پنجره ──
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -36,14 +34,8 @@ public static class NativeWin {
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
-    [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int dwProcessId);
-
     public const int SW_RESTORE = 9;
     public const int SW_MAXIMIZE = 3;
-    public const int SW_SHOW = 5;
     public static readonly IntPtr HWND_TOP = new IntPtr(0);
     public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
     public const uint SWP_NOMOVE = 0x0002;
@@ -54,99 +46,58 @@ public static class NativeWin {
 }
 "@
 
-# ═══════════════════════════════════════════════════════════
-# تابع قوی برای آوردن کروم به جلو
-# ═══════════════════════════════════════════════════════════
 function ForceChromeToFront {
-    param([int]$MaxAttempts = 10)
-
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-
-        # پیدا کردن پنجره اصلی کروم
-        $proc = Get-Process chrome -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowHandle -ne 0 } |
-            Sort-Object StartTime -Descending | Select-Object -First 1
-
-        if (-not $proc) {
-            Log "  [attempt $attempt] Chrome window not found yet..."
+    for ($i = 1; $i -le 10; $i++) {
+        $proc = Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object StartTime -Descending | Select-Object -First 1
+        if ($null -eq $proc) {
+            Log "  attempt $i - Chrome not found"
             Start-Sleep -Milliseconds 800
             continue
         }
 
         $hwnd = $proc.MainWindowHandle
-
-        # روش ۱: ShowWindow + BringWindowToTop + SetForegroundWindow
         [NativeWin]::ShowWindow($hwnd, [NativeWin]::SW_RESTORE) | Out-Null
         Start-Sleep -Milliseconds 200
         [NativeWin]::ShowWindow($hwnd, [NativeWin]::SW_MAXIMIZE) | Out-Null
-        Start-Sleep -Milliseconds 300
+        Start-Sleep -Milliseconds 200
         [NativeWin]::BringWindowToTop($hwnd) | Out-Null
-        [NativeWin]::SetWindowPos($hwnd, [NativeWin]::HWND_TOPMOST, 0, 0, 0, 0,
-            ([NativeWin]::SWP_NOMOVE -bor [NativeWin]::SWP_NOSIZE -bor [NativeWin]::SWP_SHOWWINDOW)) | Out-Null
-        [NativeWin]::SetWindowPos($hwnd, [NativeWin]::HWND_TOP, 0, 0, 0, 0,
-            ([NativeWin]::SWP_NOMOVE -bor [NativeWin]::SWP_NOSIZE -bor [NativeWin]::SWP_SHOWWINDOW)) | Out-Null
+        [NativeWin]::SetWindowPos($hwnd, [NativeWin]::HWND_TOPMOST, 0, 0, 0, 0, ([NativeWin]::SWP_NOMOVE -bor [NativeWin]::SWP_NOSIZE -bor [NativeWin]::SWP_SHOWWINDOW)) | Out-Null
+        [NativeWin]::SetWindowPos($hwnd, [NativeWin]::HWND_TOP, 0, 0, 0, 0, ([NativeWin]::SWP_NOMOVE -bor [NativeWin]::SWP_NOSIZE -bor [NativeWin]::SWP_SHOWWINDOW)) | Out-Null
         [NativeWin]::SetForegroundWindow($hwnd) | Out-Null
         Start-Sleep -Milliseconds 400
 
-        # روش ۲: AttachThreadInput برای دور زدن محدودیت SetForegroundWindow
-        try {
-            $fgHwnd = [NativeWin]::GetForegroundWindow()
-            $fgPid = 0
-            [NativeWin]::GetWindowThreadProcessId($fgHwnd, [ref]$fgPid) | Out-Null
-            $currentThread = [NativeWin]::GetCurrentThreadId()
-            $targetThread = [NativeWin]::GetWindowThreadProcessId($hwnd, [ref]$fgPid)
-
-            if ($currentThread -ne $targetThread) {
-                [NativeWin]::AttachThreadInput($currentThread, $targetThread, $true) | Out-Null
-                [NativeWin]::SetForegroundWindow($hwnd) | Out-Null
-                [NativeWin]::AttachThreadInput($currentThread, $targetThread, $false) | Out-Null
-            }
-        } catch { }
-
-        # روش ۳: WScript.Shell AppActivate به عنوان fallback
         try {
             $wshell = New-Object -ComObject WScript.Shell
             $wshell.AppActivate($proc.Id) | Out-Null
-        } catch { }
-
-        Start-Sleep -Milliseconds 500
-
-        # بررسی اینکه آیا کروم واقعاً foreground شده
-        $fgNow = [NativeWin]::GetForegroundWindow()
-        if ($fgNow -eq $hwnd) {
-            Log "  [attempt $attempt] Chrome is now FOREGROUND ✓"
-            return $true
+        } catch {
+            Log "  AppActivate failed: $($_.Exception.Message)"
         }
 
-        Log "  [attempt $attempt] Chrome not in foreground yet, retrying..."
+        Start-Sleep -Milliseconds 400
+
+        $fgNow = [NativeWin]::GetForegroundWindow()
+        if ($fgNow -eq $hwnd) {
+            Log "  attempt $i - Chrome is FOREGROUND"
+            return $true
+        }
+        Log "  attempt $i - Chrome not foreground, retrying"
         Start-Sleep -Milliseconds 500
     }
-
-    Log "  WARNING: Could not force Chrome to foreground after $MaxAttempts attempts."
+    Log "  WARNING: could not force Chrome to foreground"
     return $false
 }
 
-# ═══════════════════════════════════════════════════════════
-# مرحله ۱: منتظر باز شدن کروم می‌مانیم و آن را به جلو می‌آوریم
-# ═══════════════════════════════════════════════════════════
 Log "Waiting for Chrome to appear..."
 Start-Sleep -Seconds 3
 ForceChromeToFront | Out-Null
 Log "Chrome brought to front (initial)."
 
-# ═══════════════════════════════════════════════════════════
-# مرحله ۲: انتظار برای لود کامل شدن صفحه اینستاگرام
-# ═══════════════════════════════════════════════════════════
 Log "Waiting 15 seconds for Instagram page to load..."
 Start-Sleep -Seconds 15
 
-# دوباره مطمئن شو کروم جلو هست
 ForceChromeToFront | Out-Null
 Log "Chrome re-focused after page load."
 
-# ═══════════════════════════════════════════════════════════
-# مرحله ۳: شروع FFmpeg در حالت مخفی
-# ═══════════════════════════════════════════════════════════
 $ffmpegExe = (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue).Source
 if (-not $ffmpegExe) {
     $candidates = @(
@@ -168,9 +119,7 @@ if ($ffmpegExe) {
         "-preset","veryfast","-pix_fmt","yuv420p",$videoFile
     )
     try {
-        $ffmpegProcess = Start-Process -FilePath $ffmpegExe -ArgumentList $ffmpegArgs `
-            -PassThru -RedirectStandardOutput $ffmpegOutput -RedirectStandardError $ffmpegError `
-            -WindowStyle Hidden
+        $ffmpegProcess = Start-Process -FilePath $ffmpegExe -ArgumentList $ffmpegArgs -PassThru -RedirectStandardOutput $ffmpegOutput -RedirectStandardError $ffmpegError -WindowStyle Hidden
         Log "FFmpeg started (hidden), PID=$($ffmpegProcess.Id)"
     } catch {
         Log "FFmpeg FAILED to start: $($_.Exception.Message)"
@@ -180,15 +129,11 @@ if ($ffmpegExe) {
     Log "FFmpeg not found. Skipping video recording."
 }
 
-# بعد از شروع FFmpeg دوباره کروم را به جلو بیاور
 Start-Sleep -Seconds 2
 ForceChromeToFront | Out-Null
 Log "Chrome re-focused after FFmpeg start."
 Start-Sleep -Seconds 2
 
-# ═══════════════════════════════════════════════════════════
-# مرحله ۴: کلیک فیزیکی روی (84, 614)
-# ═══════════════════════════════════════════════════════════
 $clickX = 84
 $clickY = 614
 
@@ -205,9 +150,6 @@ Log "Click COMPLETED."
 Log "Waiting 10 seconds after click..."
 Start-Sleep -Seconds 10
 
-# ═══════════════════════════════════════════════════════════
-# مرحله ۵: CDP — پر کردن فرم
-# ═══════════════════════════════════════════════════════════
 Log "Starting CDP..."
 
 $email    = "kingkngdbjodbno@llf.com"
@@ -238,8 +180,7 @@ if ($targets) {
 (function(){
   function setNative(el, value){
     if(!el) return false;
-    var proto = el.tagName==='SELECT' ? window.HTMLSelectElement.prototype :
-                window.HTMLInputElement.prototype;
+    var proto = el.tagName==='SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
     var setter = Object.getOwnPropertyDescriptor(proto,'value').set;
     setter.call(el, value);
     el.dispatchEvent(new Event('input',{bubbles:true}));
@@ -285,13 +226,9 @@ if ($targets) {
     Log "CDP: cannot connect to port 9222"
 }
 
-# ── انتظار ۵ ثانیه بعد از ارسال فرم ──
 Log "Waiting 5 seconds after submit..."
 Start-Sleep -Seconds 5
 
-# ═══════════════════════════════════════════════════════════
-# مرحله ۶: اسکرین‌شات
-# ═══════════════════════════════════════════════════════════
 Log "Taking screenshot..."
 try {
     Add-Type -AssemblyName System.Windows.Forms
@@ -315,7 +252,6 @@ try {
     Log "Screenshot failed: $($_.Exception.Message)"
 }
 
-# ── انتظار برای پایان FFmpeg ──
 if ($ffmpegProcess) {
     Log "Waiting for FFmpeg to finish naturally..."
     try {
@@ -326,7 +262,6 @@ if ($ffmpegProcess) {
     }
 }
 
-# ── بررسی اندازه فایل‌ها ──
 Log "===== File sizes ====="
 foreach ($f in @($videoFile, $screenshotFile, $ffmpegOutput, $ffmpegError, $logFile)) {
     if (Test-Path $f) {
@@ -337,7 +272,6 @@ foreach ($f in @($videoFile, $screenshotFile, $ffmpegOutput, $ffmpegError, $logF
     }
 }
 
-# ── ساخت فایل‌های غایب ──
 if (-not (Test-Path $videoFile))      { New-Item -Path $videoFile      -ItemType File -Force | Out-Null; Log "Created placeholder for video." }
 if (-not (Test-Path $screenshotFile)) { New-Item -Path $screenshotFile -ItemType File -Force | Out-Null; Log "Created placeholder for screenshot." }
 if (-not (Test-Path $ffmpegOutput))   { New-Item -Path $ffmpegOutput   -ItemType File -Force | Out-Null }
