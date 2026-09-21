@@ -31,8 +31,6 @@ public static class NativeWin {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
@@ -49,11 +47,8 @@ public static class NativeWin {
     public const uint SWP_NOMOVE = 0x0002;
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_SHOWWINDOW = 0x0040;
-    public const uint SWP_NOACTIVATE = 0x0010;
     public const int SM_CXSCREEN = 0;
     public const int SM_CYSCREEN = 1;
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP   = 0x0004;
 }
 "@
 
@@ -183,23 +178,10 @@ if ($fgCheck4 -ne $hwnd) {
 }
 
 # ═══════════════════════════════════════════════════════════
-# کلیک فیزیکی روی (84, 614)
+# انتظار کوتاه قبل از CDP (بدون کلیک فیزیکی)
 # ═══════════════════════════════════════════════════════════
-$clickX = 84
-$clickY = 614
-
-Log "Moving cursor to X=$clickX Y=$clickY..."
-[NativeWin]::SetCursorPos($clickX, $clickY) | Out-Null
-Start-Sleep -Milliseconds 500
-
-Log "Clicking at ($clickX, $clickY)..."
-[NativeWin]::mouse_event([NativeWin]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
-Start-Sleep -Milliseconds 150
-[NativeWin]::mouse_event([NativeWin]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
-Log "Click COMPLETED."
-
-Log "Waiting 10 seconds after click..."
-Start-Sleep -Seconds 10
+Log "Waiting 5 seconds before CDP..."
+Start-Sleep -Seconds 5
 
 # ═══════════════════════════════════════════════════════════
 # CDP — پر کردن فرم با بررسی و تلاش مجدد
